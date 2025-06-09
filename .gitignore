@@ -1,0 +1,11 @@
+/venv
+/frames
+/frames_connected
+/outputs
+*.key
+/jogging*
+/Exercises
+/input*
+/output*
+*.json
+edumgt-key
