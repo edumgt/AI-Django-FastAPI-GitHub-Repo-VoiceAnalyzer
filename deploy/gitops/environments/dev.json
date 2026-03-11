@@ -1,0 +1,8 @@
+{
+  "environment": "dev",
+  "branch": "develop",
+  "aws_region": "ap-northeast-2",
+  "codepipeline_name": "voice-analyzer-dev-full",
+  "wait_for_completion": true,
+  "notes": "develop 브랜치 merge 시 자동 반영."
+}

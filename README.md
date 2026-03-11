@@ -20,7 +20,7 @@
 - ASGI Server: `Uvicorn`
 - AI Analysis/TTS: `OpenAI API` (`chat.completions`, `audio.speech`)
 - Repo Ingestion: `git clone --depth 1`
-- Config: `.env`, `python-dotenv`
+- Config: `.env`, `.env.local`, `.env.dev`, `.env.prod`, `python-dotenv`
 - Storage: 로컬 파일시스템 (`workspace_repos/`, `media/outputs/`)
 
 ## 아키텍처
@@ -33,42 +33,55 @@ FastAPI 앱에서 Django ASGI 앱을 `/`에 마운트해 단일 서버로 실행
 ## Mermaid Flow
 ```mermaid
 flowchart TD
-    A[사용자: GitHub URL 입력] --> B[Django UI]
-    B --> C[POST api analyze]
-    C --> D[URL 검증]
-    D --> E[GitHub Public Repo Clone]
-    E --> F[소스 샘플링/컨텍스트 생성]
-    F --> G[OpenAI 코드 분석 요청]
-    G --> H[분석 텍스트 + 내레이션 스크립트 생성]
-    H --> I[OpenAI TTS MP3 생성]
-    I --> J[media outputs 저장]
-    J --> K[결과 JSON 반환]
-    K --> L[웹 UI에서 분석 표시/음성 재생/다운로드]
+    A[User Input URL]
+    B[Django UI]
+    C[API Analyze]
+    D[Validate URL]
+    E[Clone Repository]
+    F[Build Prompt Context]
+    G[OpenAI Analysis]
+    H[Generate Narration]
+    I[OpenAI TTS]
+    J[Save Outputs]
+    K[Return JSON]
+    L[Show Result]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+    K --> L
 ```
 
 ## Mermaid Sequence
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant D as Django UI
-    participant F as FastAPI API
+    participant D as Django
+    participant F as FastAPI
     participant G as GitHub
-    participant O as OpenAI API
-    participant S as Local Storage
+    participant O as OpenAI
+    participant S as Storage
 
-    U->>D: GitHub Public URL 입력 + 분석 요청
-    D->>F: POST api analyze repo_url
-    F->>F: URL 유효성 검사
-    F->>G: git clone --depth 1
-    G-->>F: 저장소 로컬 복제 완료
-    F->>F: 코드 샘플링/프롬프트 컨텍스트 구성
-    F->>O: 코드 분석 요청 chat.completions
-    O-->>F: 분석 텍스트 + 내레이션 스크립트
-    F->>O: 음성 생성 요청 audio.speech
-    O-->>F: MP3 바이너리
-    F->>S: 분석 md, 음성 mp3 저장
-    F-->>D: 결과 JSON (text/audio URL)
-    D-->>U: 분석 표시 + 오디오 재생/다운로드
+    U->>D: Request analysis
+    D->>F: POST api analyze
+    F->>F: Validate URL
+    F->>G: Clone repository
+    G-->>F: Repository ready
+    F->>F: Build prompt context
+    F->>O: Request code analysis
+    O-->>F: Return analysis text
+    F->>O: Request speech generation
+    O-->>F: Return mp3
+    F->>S: Save files
+    F-->>D: Return result
+    D-->>U: Show text and audio
 ```
 
 ## 프로젝트 구조
@@ -87,6 +100,10 @@ services/
 manage.py
 requirements.txt
 .env.example
+.env.local.example
+.env.dev.example
+.env.prod.example
+deploy/gitops/environments/
 ```
 
 ## 설치
@@ -95,9 +112,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+cp .env.local.example .env.local
 ```
 
-`.env`에서 `OPENAI_API_KEY`를 반드시 설정하세요.
+`APP_ENV`에 따라 `.env.local/.env.dev/.env.prod`가 자동 로드됩니다.
+기본값은 `APP_ENV=local` 입니다.
 
 ## 실행
 ```bash
@@ -105,17 +124,44 @@ uvicorn repo_voice_analyzer.fastapi_app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ## Docker 실행
-`.env`를 준비한 뒤 Docker Compose로 실행할 수 있습니다.
+환경 파일을 준비한 뒤 Docker Compose로 실행할 수 있습니다.
 
 ```bash
-cp .env.example .env
-# .env 파일에서 OPENAI_API_KEY 설정
-docker compose up -d --build
+cp .env.local.example .env.local
+# .env.local 파일에서 OPENAI_API_KEY 설정
+docker compose --env-file .env.local up -d --build
 ```
 
 중지:
 ```bash
 docker compose down
+```
+
+## 환경 분리 (`local` / `dev` / `prod`)
+
+### 로컬 실행
+```bash
+cp .env.local.example .env.local
+APP_ENV=local uvicorn repo_voice_analyzer.fastapi_app:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 개발 환경 실행
+```bash
+cp .env.dev.example .env.dev
+APP_ENV=dev uvicorn repo_voice_analyzer.fastapi_app:app --host 0.0.0.0 --port 8000
+```
+
+### 운영 환경 실행
+```bash
+cp .env.prod.example .env.prod
+APP_ENV=prod uvicorn repo_voice_analyzer.fastapi_app:app --host 0.0.0.0 --port 8000
+```
+
+### Docker로 환경별 실행
+```bash
+docker compose --env-file .env.local up -d --build
+docker compose --env-file .env.dev up -d --build
+docker compose --env-file .env.prod up -d --build
 ```
 
 브라우저:
@@ -167,67 +213,90 @@ docker compose down
 
 ---
 
-## 1) 권장 AWS 아키텍처 구성도
+## 1) 권장 AWS 아키텍처 구성도 (2분할)
 
-아래 SVG 구성도는 AWS 리소스 아이콘이 또렷하게 보이도록 제작했습니다.
+`Mermaid 10.9.3` 파싱 안정성과 가독성을 위해 `런타임`과 `CI/CD`를 분리했습니다.
+SVG는 화살표를 카드 뒤 레이어에 배치해 아이콘 가림을 최소화했습니다.
 
-![AWS Architecture Diagram](docs/aws-architecture-diagram.svg)
+### 1-1) Runtime/Data Plane
+
+![AWS Runtime Architecture Diagram](docs/aws-architecture-runtime.svg)
 
 ```mermaid
-flowchart TB
-    U[User Client] --> R53[Amazon Route 53 DNS]
-    R53 --> CF[Amazon CloudFront CDN TLS]
-    CF --> ALB[Application Load Balancer]
-    CF --> S3[Amazon S3 Static and Output]
+flowchart LR
+    U[User]
+    R53[Route53]
+    CF[CloudFront]
+    WAF[AWS WAF]
+    ALB[ALB]
+    ECS[ECS Fargate]
+    WKR[Worker]
+    SQS[SQS]
+    RDS[RDS PostgreSQL]
+    REDIS[ElastiCache Redis]
+    S3[S3]
+    SM[Secrets Manager]
+    CW[CloudWatch]
+    NAT[NAT Gateway]
+    OPENAI[OpenAI API]
+    GH[GitHub]
 
-    subgraph AWS_REGION[AWS Region]
-      direction TB
+    U --> R53
+    R53 --> CF
+    CF --> WAF
+    WAF --> ALB
+    ALB --> ECS
+    ECS --> SQS
+    SQS --> WKR
+    ECS --> RDS
+    ECS --> REDIS
+    ECS --> S3
+    WKR --> S3
+    ECS --> SM
+    WKR --> SM
+    ECS --> CW
+    WKR --> CW
+    ECS --> NAT
+    WKR --> NAT
+    NAT --> OPENAI
+    NAT --> GH
+    CF --> S3
+```
 
-      subgraph VPC[VPC Multi AZ]
-        direction TB
+### 1-2) CI/CD Control Plane (Full CodePipeline)
 
-        subgraph PUBLIC[Public Subnets]
-          IGW[Internet Gateway]
-          NAT[NAT Gateway]
-          ALB
-        end
+![AWS CI CD Architecture Diagram](docs/aws-architecture-cicd.svg)
 
-        subgraph PRIVATE_APP[Private App Subnets]
-          ECS[ECS Fargate App Service]
-          WKR[Worker Service]
-          SQS[Amazon SQS Queue]
-        end
+```mermaid
+flowchart LR
+    GH[GitHub]
+    GHA[GitHub Actions]
+    CP[CodePipeline]
+    CB[CodeBuild]
+    CD[CodeDeploy]
+    ECR[ECR]
+    ART[S3 Artifacts]
+    ECS[ECS Service]
+    ALB[ALB]
+    IAM[IAM Role]
+    ACM[ACM]
+    CW[CloudWatch]
 
-        subgraph PRIVATE_DATA[Private Data Subnets]
-          RDS[Amazon RDS PostgreSQL]
-          EC[Amazon ElastiCache Redis]
-        end
-
-        IGW --> ALB
-        ALB --> ECS
-        ECS --> SQS
-        SQS --> WKR
-        ECS --> RDS
-        ECS --> EC
-        ECS --> NAT
-        WKR --> NAT
-        WKR --> RDS
-      end
-
-      ECS --> S3
-      WKR --> S3
-      ECS --> SM[AWS Secrets Manager]
-      WKR --> SM
-      ECS --> CW[Amazon CloudWatch]
-      WKR --> CW
-    end
-
-    GH[GitHub Actions] --> ECR[Amazon ECR]
+    GH --> GHA
+    GHA --> CP
+    CP --> CB
+    CB --> ECR
+    CP --> CD
+    CP --> ART
     ECR --> ECS
-    GH --> ECS
-
-    NAT --> OPENAI[OpenAI API]
-    NAT --> GITHUB[GitHub Repository]
+    CD --> ECS
+    CD --> ALB
+    IAM --> CP
+    IAM --> CB
+    IAM --> CD
+    ACM --> ALB
+    CW --> CB
+    CW --> CD
 ```
 
 ---
@@ -263,11 +332,37 @@ flowchart TB
 - **AWS Backup (선택)**: RDS 스냅샷 및 복구 정책.
 
 ### CI/CD
-- **GitHub Actions**:
-  1. 테스트/빌드
-  2. Docker 이미지 생성
-  3. ECR 푸시
-  4. ECS 서비스 업데이트(롤링 배포)
+- **GitOps + GitHub Actions + AWS CodePipeline (Full)**:
+  1. Git에 선언된 환경 프로필(`deploy/gitops/environments/*.json`)을 단일 소스로 사용
+  2. 브랜치(`develop`/`main`)에 맞는 환경(`dev`/`prod`) 자동 매핑
+  3. CodePipeline 실행 전 CodeBuild/CodeDeploy 스테이지 유효성 검증
+  4. CodeBuild에서 빌드/테스트 및 ECR 푸시
+  5. CodeDeploy로 ECS 배포(Blue/Green 또는 Rolling)
+
+### GitHub Actions 워크플로우 파일
+- **파일**: `.github/workflows/codepipeline-full.yml`
+- **동작**:
+  1. `develop` push -> `dev` 프로필, `main` push -> `prod` 프로필 적용
+  2. 수동 실행(`workflow_dispatch`) 시 `local/dev/prod` 선택 가능
+  3. GitOps 프로필에서 `aws_region`, `codepipeline_name`, `wait_for_completion` 로드
+  4. 파이프라인에 **CodeBuild + CodeDeploy** 포함 여부 검증
+  5. 파이프라인 실행 및 완료 상태 대기(옵션)
+- **GitOps Profile**
+  - `deploy/gitops/environments/dev.json`
+  - `deploy/gitops/environments/prod.json`
+  - `deploy/gitops/environments/local.json`
+- **Repository Variables**
+  - `AWS_REGION` (fallback, 예: `ap-northeast-2`)
+  - `CODEPIPELINE_NAME` (fallback, 예: `voice-analyzer-full`)
+- **Repository Secrets**
+  - 권장: `AWS_GITHUB_ROLE_ARN` (OIDC AssumeRole)
+  - 대체: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+
+### GitOps 운영 흐름
+1. 배포 목표 상태를 `deploy/gitops/environments/*.json`에서 수정
+2. Pull Request로 변경 이력/리뷰를 남긴 뒤 승인
+3. `develop` 또는 `main` 머지 시 환경에 맞는 CodePipeline 자동 실행
+4. 런타임 인프라 상태와 Git 선언 상태를 동기화
 
 ---
 
@@ -291,7 +386,7 @@ flowchart TB
 - **CloudWatch / Secrets Manager / IAM / (선택) WAF**
 
 ### CI/CD
-- **GitHub Actions** 기반 빌드/배포 자동화
+- **GitOps + GitHub Actions + AWS CodePipeline(CodeBuild/CodeDeploy)** 기반 빌드/배포 자동화
 
 ---
 
@@ -681,6 +776,20 @@ aws ecs wait services-stable --region "${AWS_REGION}" --cluster "${CLUSTER}" --s
 
 echo "Rolled out: ${NEW_TASK_DEF_ARN}"
 ```
+
+### 실행 후 AWS Console 예시 이미지
+
+아래 이미지는 AWS CLI 실행 후 콘솔에서 확인하게 되는 리소스 화면의 예시입니다.
+
+![AWS Console Example - VPC Resource Map Overview](docs/aws-console-examples/vpc-resource-map-overview.jpg)
+
+![AWS Console Example - VPC Create Preview](docs/aws-console-examples/vpc-create-preview.jpg)
+
+![AWS Console Example - VPC Resource Map Detail](docs/aws-console-examples/vpc-resource-map-detail.jpg)
+
+출처:
+- AWS 공식 블로그 - *Visualize your VPC resources with Amazon VPC resource map*  
+  https://aws.amazon.com/blogs/networking-and-content-delivery/visualize-your-vpc-resources-with-amazon-vpc-resource-map/
 
 ---
 

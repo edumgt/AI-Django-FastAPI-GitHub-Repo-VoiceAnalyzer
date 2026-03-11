@@ -1,0 +1,8 @@
+{
+  "environment": "prod",
+  "branch": "main",
+  "aws_region": "ap-northeast-2",
+  "codepipeline_name": "voice-analyzer-prod-full",
+  "wait_for_completion": true,
+  "notes": "main 브랜치 merge 시 프로덕션 파이프라인 반영."
+}

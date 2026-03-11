@@ -5,10 +5,22 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+
+# 1) shared default (.env) -> 2) env-specific (.env.local/.env.dev/.env.prod)
+load_dotenv(BASE_DIR / ".env", override=False)
+APP_ENV = os.getenv("APP_ENV", "local").strip().lower() or "local"
+load_dotenv(BASE_DIR / f".env.{APP_ENV}", override=True)
+
+custom_env_file = os.getenv("ENV_FILE", "").strip()
+if custom_env_file:
+    custom_env_path = Path(custom_env_file)
+    if not custom_env_path.is_absolute():
+        custom_env_path = BASE_DIR / custom_env_path
+    load_dotenv(custom_env_path, override=True)
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-dev-key-change-me")
-DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+default_debug = "false" if APP_ENV == "prod" else "true"
+DEBUG = os.getenv("DJANGO_DEBUG", default_debug).lower() in {"1", "true", "yes", "on"}
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
@@ -77,3 +89,11 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+if APP_ENV == "prod":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = os.getenv(
+        "DJANGO_SECURE_SSL_REDIRECT", "true"
+    ).lower() in {"1", "true", "yes", "on"}

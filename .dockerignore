@@ -6,6 +6,11 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env.*
+!.env.example
+!.env.local.example
+!.env.dev.example
+!.env.prod.example
 db.sqlite3
 media/
 workspace_repos/

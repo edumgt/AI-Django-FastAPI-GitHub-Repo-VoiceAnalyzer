@@ -10,6 +10,9 @@
 
 edumgt-key
 .env
+.env.local
+.env.dev
+.env.prod
 .venv
 __pycache__/
 *.pyc

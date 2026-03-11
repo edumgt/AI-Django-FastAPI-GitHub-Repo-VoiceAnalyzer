@@ -1,0 +1,8 @@
+{
+  "environment": "local",
+  "branch": "local",
+  "aws_region": "ap-northeast-2",
+  "codepipeline_name": "voice-analyzer-local",
+  "wait_for_completion": false,
+  "notes": "로컬 검증용 profile. 기본적으로 workflow_dispatch로 실행."
+}

@@ -1,0 +1,244 @@
+name: Deploy via Full CodePipeline (GitOps)
+
+on:
+  push:
+    branches: ["develop", "main"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - local
+          - dev
+          - prod
+      pipeline_name:
+        description: "Override CodePipeline name (optional)"
+        required: false
+        type: string
+      wait_for_completion:
+        description: "Wait for pipeline completion"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: codepipeline-full-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || 'ap-northeast-2' }}
+  CODEPIPELINE_NAME: ${{ vars.CODEPIPELINE_NAME }}
+
+jobs:
+  trigger-full-codepipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve GitOps profile
+        id: resolve
+        shell: bash
+        run: |
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_NAME="${GITHUB_REF_NAME}"
+
+          INPUT_ENV="$(jq -r '.inputs.environment // empty' "$GITHUB_EVENT_PATH")"
+          INPUT_PIPELINE_NAME="$(jq -r '.inputs.pipeline_name // empty' "$GITHUB_EVENT_PATH")"
+          INPUT_WAIT="$(jq -r '.inputs.wait_for_completion // empty' "$GITHUB_EVENT_PATH")"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TARGET_ENV="${INPUT_ENV:-dev}"
+          else
+            case "$REF_NAME" in
+              develop) TARGET_ENV="dev" ;;
+              main) TARGET_ENV="prod" ;;
+              *)
+                echo "::error::Unsupported branch '$REF_NAME' for GitOps deployment."
+                exit 1
+                ;;
+            esac
+          fi
+
+          CONFIG_FILE="deploy/gitops/environments/${TARGET_ENV}.json"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::Missing GitOps profile: $CONFIG_FILE"
+            exit 1
+          fi
+
+          FILE_ENV="$(jq -r '.environment // empty' "$CONFIG_FILE")"
+          FILE_BRANCH="$(jq -r '.branch // empty' "$CONFIG_FILE")"
+          FILE_REGION="$(jq -r '.aws_region // empty' "$CONFIG_FILE")"
+          FILE_PIPELINE_NAME="$(jq -r '.codepipeline_name // empty' "$CONFIG_FILE")"
+          FILE_WAIT="$(jq -r '.wait_for_completion // empty' "$CONFIG_FILE")"
+
+          if [ "$EVENT_NAME" = "push" ] && [ -n "$FILE_BRANCH" ] && [ "$FILE_BRANCH" != "$REF_NAME" ]; then
+            echo "::error::GitOps profile branch mismatch. profile=$FILE_BRANCH, ref=$REF_NAME"
+            exit 1
+          fi
+
+          if [ -z "$FILE_ENV" ] || [ -z "$FILE_REGION" ] || [ -z "$FILE_PIPELINE_NAME" ]; then
+            echo "::error::GitOps profile missing required fields (environment/aws_region/codepipeline_name)."
+            exit 1
+          fi
+
+          RESOLVED_REGION="${FILE_REGION:-${AWS_REGION}}"
+          RESOLVED_PIPELINE_NAME="${INPUT_PIPELINE_NAME:-${FILE_PIPELINE_NAME:-${CODEPIPELINE_NAME:-}}}"
+
+          if [ -z "$RESOLVED_PIPELINE_NAME" ]; then
+            echo "::error::Pipeline name not found. Set pipeline_name input or GitOps profile codepipeline_name."
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_WAIT" ]; then
+            WAIT_FOR_COMPLETION="$INPUT_WAIT"
+          else
+            WAIT_FOR_COMPLETION="${FILE_WAIT:-true}"
+          fi
+
+          case "$WAIT_FOR_COMPLETION" in
+            true|false) ;;
+            *)
+              echo "::error::wait_for_completion must be true or false."
+              exit 1
+              ;;
+          esac
+
+          echo "environment=$TARGET_ENV" >> "$GITHUB_OUTPUT"
+          echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+          echo "pipeline_name=$RESOLVED_PIPELINE_NAME" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$RESOLVED_REGION" >> "$GITHUB_OUTPUT"
+          echo "wait_for_completion=$WAIT_FOR_COMPLETION" >> "$GITHUB_OUTPUT"
+
+          echo "GitOps environment: $TARGET_ENV"
+          echo "GitOps profile: $CONFIG_FILE"
+          echo "Region: $RESOLVED_REGION"
+          echo "Pipeline: $RESOLVED_PIPELINE_NAME"
+          echo "Wait: $WAIT_FOR_COMPLETION"
+
+      - name: Validate credential source
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.AWS_GITHUB_ROLE_ARN }}" ]; then
+            echo "Using OIDC role assumption."
+          else
+            if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+              echo "::error::Set AWS_GITHUB_ROLE_ARN (recommended) or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
+              exit 1
+            fi
+            echo "Using access key fallback."
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: ${{ secrets.AWS_GITHUB_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ steps.resolve.outputs.aws_region }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          role-session-name: gha-codepipeline-full
+
+      - name: Configure AWS credentials (Access Key fallback)
+        if: ${{ secrets.AWS_GITHUB_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ steps.resolve.outputs.aws_region }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Validate full pipeline stages (CodeBuild + CodeDeploy)
+        shell: bash
+        run: |
+          PIPELINE_NAME="${{ steps.resolve.outputs.pipeline_name }}"
+          PIPELINE_JSON="$(aws codepipeline get-pipeline --name "$PIPELINE_NAME")"
+          PROVIDERS="$(echo "$PIPELINE_JSON" | jq -r '.pipeline.stages[].actions[].actionTypeId.provider' | sort -u)"
+
+          echo "Action providers:"
+          echo "$PROVIDERS"
+
+          if ! echo "$PROVIDERS" | grep -qx "CodeBuild"; then
+            echo "::error::Pipeline '$PIPELINE_NAME' does not include a CodeBuild action."
+            exit 1
+          fi
+
+          if ! echo "$PROVIDERS" | grep -Eq '^(CodeDeploy|CodeDeployToECS)$'; then
+            echo "::error::Pipeline '$PIPELINE_NAME' does not include a CodeDeploy or CodeDeployToECS action."
+            exit 1
+          fi
+
+      - name: Start pipeline execution
+        id: start
+        shell: bash
+        run: |
+          PIPELINE_NAME="${{ steps.resolve.outputs.pipeline_name }}"
+          EXECUTION_ID="$(aws codepipeline start-pipeline-execution --name "$PIPELINE_NAME" --query 'pipelineExecutionId' --output text)"
+
+          if [ -z "$EXECUTION_ID" ] || [ "$EXECUTION_ID" = "None" ]; then
+            echo "::error::Failed to start pipeline execution."
+            exit 1
+          fi
+
+          echo "execution_id=$EXECUTION_ID" >> "$GITHUB_OUTPUT"
+          echo "Execution: $EXECUTION_ID"
+
+      - name: Wait for pipeline result
+        if: ${{ steps.resolve.outputs.wait_for_completion == 'true' }}
+        shell: bash
+        run: |
+          PIPELINE_NAME="${{ steps.resolve.outputs.pipeline_name }}"
+          EXECUTION_ID="${{ steps.start.outputs.execution_id }}"
+          ATTEMPTS=0
+          MAX_ATTEMPTS=180
+
+          while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
+            STATUS="$(aws codepipeline get-pipeline-execution \
+              --pipeline-name "$PIPELINE_NAME" \
+              --pipeline-execution-id "$EXECUTION_ID" \
+              --query 'pipelineExecution.status' \
+              --output text)"
+
+            echo "[$ATTEMPTS/$MAX_ATTEMPTS] status=$STATUS"
+
+            case "$STATUS" in
+              Succeeded)
+                echo "Pipeline succeeded."
+                exit 0
+                ;;
+              Failed|Superseded|Cancelled|Stopped|Stopping)
+                echo "::error::Pipeline ended with status: $STATUS"
+                exit 1
+                ;;
+              InProgress)
+                sleep 20
+                ;;
+              *)
+                echo "::warning::Unexpected status '$STATUS'. Retrying..."
+                sleep 20
+                ;;
+            esac
+
+            ATTEMPTS=$((ATTEMPTS + 1))
+          done
+
+          echo "::error::Timeout waiting for pipeline completion."
+          exit 1
+
+      - name: Print console link
+        if: always()
+        shell: bash
+        run: |
+          REGION="${{ steps.resolve.outputs.aws_region }}"
+          PIPELINE_NAME="${{ steps.resolve.outputs.pipeline_name }}"
+          EXECUTION_ID="${{ steps.start.outputs.execution_id }}"
+          ENV_NAME="${{ steps.resolve.outputs.environment }}"
+
+          echo "Environment: $ENV_NAME"
+          echo "Pipeline: $PIPELINE_NAME"
+          echo "Execution: $EXECUTION_ID"
+          echo "Console: https://${REGION}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${PIPELINE_NAME}/view?region=${REGION}"
